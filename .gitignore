@@ -1,0 +1,19 @@
+### macOS ###
+.DS_Store
+.AppleDouble
+.LSOverride
+
+### 构建产物 ###
+# 199 MB 的 SwiftPM 构建目录，进过一次 commit 就很难从历史里清掉
+.build/
+.swiftpm/
+MacMon.app/
+DerivedData/
+*.dSYM
+*.dSYM.zip
+
+### 编辑器 ###
+.vscode/
+.idea/
+*.swp
+*~
