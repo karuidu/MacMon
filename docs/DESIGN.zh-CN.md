@@ -313,13 +313,22 @@ Instruments 模板（Activity Monitor / Allocations & Leaks / File Activity / Sy
 
 ## 验收工具
 
-项目没有 test target，三个可脚本化的入口代替它：
+项目没有 test target，四个可脚本化的入口代替它：
 
 - `--diagnose` 打印每个采集器的实机输出加交叉校验（`CProc` 可读性、内存自检偏差、进程解析条数）
 - `--window-selftest` 驱动窗口生命周期，每步打印状态
 - `--menus` 打印运行中的 `NSApp.mainMenu` 完整结构——标题、快捷键、层级——然后退出。
   没有辅助功能授权，脚本点不开菜单，但能读菜单；于是「服务子菜单到底有没有了」变成一条
   可验证的断言，而不是一张要人肉眼看的截图。
+- `scripts/check-l10n.py` 解析 `en` 字典和每一处 `L.t("…")` / `L.f("…")` 调用点，
+  「用了但没翻」和「`%@` 数量与译文对不上」都直接返回非零。漏翻在运行时是静默的
+  （查不到就退回中文），所以这是覆盖率唯一能自动兜住的地方。解析要留神：长译文会被
+  编辑器折到下一行，按行首锚定的正则会漏掉它们——一张其实完整的表会被报出 12 条假缺口。
+
+`.github/workflows/ci.yml` 把两个无头也能跑的入口（`--diagnose`，外加编译与产物校验）当门禁，
+把依赖 GUI 的 `--menus` / `--window-selftest` 设成 `continue-on-error`——GitHub 的 macOS
+runner 不保证有 WindowServer 会话。断言一律只看结构：每段有输出、进程数大于 0、内存分项合计
+偏差在 ±3% 内，因为 runner 是虚拟机，没有电池也没有 HID 传感器。
 
 截图用 `screencapture -l <windowID>`（窗口号从 `CGWindowListCopyWindowInfo` 取），
 截出来是「只有窗口 + 阴影」，天然排除系统通知横幅和其他 App。注意多显示器下

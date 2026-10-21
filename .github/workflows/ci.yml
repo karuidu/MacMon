@@ -1,0 +1,212 @@
+name: CI
+
+# 三件事，按「能不能可靠地跑在无头 VM 上」分层：
+#   1. build      编译 + 打包 + 产物结构校验  → 门禁，红了不许合
+#   2. 运行自检    --diagnose（纯系统 API）    → 门禁，只断言结构不断言数值
+#                  --menus / --window-selftest  → 非门禁，需要 GUI 会话，跑不出来属预期
+#   3. hygiene    产物入库检查 + 翻译表完整性  → 门禁，跑在 ubuntu 上，几乎不占 macOS 额度
+#
+# 触发方式刻意用 `pull_request` 而不是 `pull_request_target`：
+# 前者只给 fork 来的代码一个只读 token，泄露不了 secrets，也推不了仓库。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 本机受限环境（外层套了 sandbox）需要它才能编译，GitHub runner 上留着也无害。
+  # 让 CI 和本地跑的命令完全一致，省得「本地过了 CI 挂」这种对不上账。
+  SWIFT_BUILD_ARGS: --disable-sandbox
+
+jobs:
+  build:
+    name: 构建与打包
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 工具链版本
+        run: |
+          swift --version
+          xcodebuild -version
+
+      # 不缓存 .build：缓存里的旧产物和 Package.swift 失配时报错很难懂，
+      # 而这个项目没有第三方依赖，冷编译本来就是一分钟级别。
+      - name: 编译 release
+        run: |
+          set -o pipefail
+          swift build -c release ${SWIFT_BUILD_ARGS} 2>&1 | tee build.log
+
+      - name: 零警告检查
+        run: |
+          if grep -nE 'Sources/.*: warning:' build.log; then
+            echo "::error::源码有编译警告。这个项目刻意保持零警告，请先修掉上面的警告。"
+            exit 1
+          fi
+          echo "✓ 没有编译警告"
+
+      - name: 组装 MacMon.app
+        run: ./build-app.sh
+
+      - name: 校验 app bundle
+        run: |
+          set -euo pipefail
+          APP=MacMon.app
+          PLIST="$APP/Contents/Info.plist"
+
+          test -x "$APP/Contents/MacOS/MacMon"
+          plutil -lint "$PLIST"
+
+          bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST")
+          [ "$bundle_id" = "com.macmon.desktop" ] || {
+            echo "::error::CFBundleIdentifier 变成了 $bundle_id"; exit 1; }
+
+          # Package.swift 的平台声明和 Info.plist 的最低系统版本必须一起改，
+          # 只改一个会让「SwiftPM 说 14.0、Finder 说别的」这种错位溜过去
+          pkg_major=$(grep -oE '\.macOS\(\.v[0-9]+' Package.swift | grep -oE '[0-9]+$' || true)
+          plist_major=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$PLIST" | cut -d. -f1)
+          [ -n "$pkg_major" ] || { echo "::error::Package.swift 里没找到 platforms 声明"; exit 1; }
+          [ "$pkg_major" = "$plist_major" ] || {
+            echo "::error::Package.swift 要求 macOS $pkg_major，Info.plist 写的是 $plist_major"; exit 1; }
+          echo "✓ 最低系统版本一致：macOS $pkg_major"
+
+          codesign --verify --deep --strict "$APP"
+
+      - name: 校验图标逐个尺寸渲染过
+        run: |
+          set -euo pipefail
+          ICNS=MacMon.app/Contents/Resources/AppIcon.icns
+          test -f "$ICNS" || { echo "::error::bundle 里没有 AppIcon.icns"; exit 1; }
+
+          # 反解 .icns：每个尺寸单独渲染过的图标反解出来应该有 10 个 PNG。
+          # 只有 5~6 个说明退回了「拿 1024 母图缩全部尺寸」的老路——小尺寸会糊。
+          OUT="$(mktemp -d)/MacMon.iconset"
+          iconutil -c iconset "$ICNS" -o "$OUT"
+          count=$(find "$OUT" -name '*.png' | wc -l | tr -d ' ')
+          echo "iconset 反解出 $count 个尺寸："
+          find "$OUT" -name '*.png' -exec basename {} \; | sort
+          [ "$count" -ge 10 ] || {
+            echo "::error::只有 $count 个尺寸，图标疑似退回了单图缩放（见 assets/build-icon.sh）"; exit 1; }
+
+      # 采集层是纯系统 API 调用，跑在 MacMonApp.init() 里、早于任何 AppKit 视图，
+      # 因此不需要 GUI 会话，可以当门禁。断言只看「有没有这一行」，不看具体数值：
+      # runner 是虚拟机，没有电池、大概率枚举不到 HID 温度传感器。
+      - name: 采集链路自检（--diagnose）
+        run: |
+          set -o pipefail
+          ./MacMon.app/Contents/MacOS/MacMon --diagnose 2>&1 | tee diagnose.log || true
+          echo "---------- 诊断输出 ----------"
+          cat diagnose.log
+
+          for key in "=== 完 ===" "CPU  :" "内存  :" "磁盘  :" "网络  :" "进程  :"; do
+            grep -qF "$key" diagnose.log || { echo "::error::诊断输出缺少「$key」这一行"; exit 1; }
+          done
+
+          grep -qE '进程  : [1-9][0-9]* 个' diagnose.log || {
+            echo "::error::进程采集为空"; exit 1; }
+
+          # 内存分项合计要贴近物理内存。本机是 +0.0%，虚拟机里放宽到 ±3%。
+          drift=$(sed -nE 's/.*偏差 ([-+]?[0-9]+\.[0-9]+)%.*/\1/p' diagnose.log | head -1)
+          echo "内存分项偏差：${drift:-未读到}%"
+          [ -n "$drift" ] || { echo "::error::没读到内存自检偏差"; exit 1; }
+          awk -v d="$drift" 'BEGIN { exit (d <= 3 && d >= -3) ? 0 : 1 }' || {
+            echo "::error::内存分项偏差 ${drift}%，超出 ±3%"; exit 1; }
+          echo "✓ 采集链路正常"
+
+      # 下面两个需要 WindowServer。GitHub 的 macOS runner 大多能跑起来，但不保证，
+      # 所以 continue-on-error：日志照样上传，红了也不挡合并。
+      - name: 菜单结构自检（--menus，需要 GUI 会话）
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          ./MacMon.app/Contents/MacOS/MacMon --menus 2>&1 | tee menus.log || true
+          cat menus.log
+          grep -qF "MENU done" menus.log || {
+            echo "::warning::没读到 MENU done（runner 无 GUI 会话时属预期，退出码在 App 里恒为 0，别被绿勾骗了）"; }
+
+      - name: 窗口自检（--window-selftest，需要 GUI 会话）
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          ./MacMon.app/Contents/MacOS/MacMon --window-selftest 2>&1 | tee window.log || true
+          cat window.log
+          grep -qF "WIN done" window.log || {
+            echo "::warning::没读到 WIN done（同上，无 GUI 会话时属预期）"; }
+
+      - name: 上传日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selftest-logs
+          path: |
+            build.log
+            diagnose.log
+            menus.log
+            window.log
+          if-no-files-found: ignore
+
+      - name: 打包 .app 供下载
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent MacMon.app MacMon.zip
+          ls -lh MacMon.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MacMon-app
+          path: MacMon.zip
+          if-no-files-found: error
+
+  hygiene:
+    name: 仓库体检
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # 这两条是 .build/（199 MB）和 MacMon.app/（3.5 MB）被误提交的看门狗。
+      # 一旦进了历史，后面清起来要 rewrite。
+      - name: 构建产物没有入库
+        run: |
+          set -euo pipefail
+          if git ls-files | grep -E '^(\.build/|\.swiftpm/|MacMon\.app/|DerivedData/)'; then
+            echo "::error::构建产物被提交了。执行 git rm -r --cached <路径> 后再提交。"
+            exit 1
+          fi
+          echo "✓ 仓库里没有构建产物"
+
+      - name: .gitignore 仍然挡着构建产物
+        run: |
+          set -euo pipefail
+          for entry in '.build/' 'MacMon.app/' '.DS_Store'; do
+            grep -qxF "$entry" .gitignore || {
+              echo "::error::.gitignore 里少了「$entry」这一行"; exit 1; }
+          done
+          echo "✓ .gitignore 完好"
+
+      - name: 翻译表完整性
+        run: python3 scripts/check-l10n.py
+
+  # 一个空 job 汇总上面两个，分支保护只需要勾这一个必过检查，
+  # 以后加 job 不用去改分支保护规则。
+  ci:
+    name: CI 通过
+    needs: [build, hygiene]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: 汇总结果
+        run: |
+          echo "build=${{ needs.build.result }}  hygiene=${{ needs.hygiene.result }}"
+          [ "${{ needs.build.result }}" = "success" ] || exit 1
+          [ "${{ needs.hygiene.result }}" = "success" ] || exit 1
+          echo "✓ 全部通过"

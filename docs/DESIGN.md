@@ -375,7 +375,7 @@ at the same time.
 
 ## Verification tooling
 
-There is no test target. Three scriptable entry points stand in for one:
+There is no test target. Four scriptable entry points stand in for one:
 
 - `--diagnose` prints every collector's real output plus cross-checks
   (`CProc` readability, memory self-check drift, process parse counts).
@@ -384,6 +384,20 @@ There is no test target. Three scriptable entry points stand in for one:
   exits. Menus cannot be opened by a script without Accessibility permission, but they
   can be read, which makes "is the Services submenu really gone" a checkable claim
   instead of a screenshot someone has to eyeball.
+- `scripts/check-l10n.py` parses the `en` dictionary and every `L.t("…")` / `L.f("…")`
+  call site, then fails on a key that is used but untranslated, or on one whose `%@`
+  count differs from its translation. A missing key is silent at runtime (the table
+  falls back to Chinese), so this is the only automated guard on coverage. Parsing the
+  dictionary needs care: long translations wrap onto a second line, and a
+  line-anchored regex silently misses them — it reported 12 phantom gaps on a table
+  that was in fact complete.
+
+`.github/workflows/ci.yml` gates on the two headless-safe entry points (`--diagnose`,
+plus the build and package checks) and runs the GUI-dependent ones
+(`--menus`, `--window-selftest`) with `continue-on-error`, since a GitHub macOS runner
+has no guaranteed `WindowServer` session. Assertions are structural — every section
+printed, process count positive, memory parts within ±3% — because the runner is a VM
+with no battery and no HID sensors.
 
 For screenshots, `screencapture -l <windowID>` (with the id from
 `CGWindowListCopyWindowInfo`) captures just the window plus its shadow, so system

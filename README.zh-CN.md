@@ -4,6 +4,7 @@
 
 <img src="assets/icon-1024.png" width="112" align="right" alt="MacMon 图标">
 
+![CI](https://github.com/karuidu/MacMon/actions/workflows/ci.yml/badge.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-blue)
 ![Swift](https://img.shields.io/badge/Swift-5.10-orange)
 ![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)
@@ -304,6 +305,7 @@ enum L {
 ## 目录结构
 
 ```
+.github/workflows/ci.yml    CI：编译、产物校验、自检、仓库体检
 Package.swift              SwiftPM 清单——全部构建定义
 Sources/
 ├── CProc/                 libproc.h / sys/proc_info.h 的薄 C 桥接
@@ -321,6 +323,7 @@ Sources/
 │   ├── Models/            指标与风险模型
 │   └── Views/             DashboardView、Pages/、Cards/、Widgets/、Theme
 build-app.sh               组装并 ad-hoc 签名 MacMon.app
+scripts/check-l10n.py      翻译覆盖率：漏翻的键、%@ 数量不一致
 assets/make-icon.swift     图标生成器：Core Graphics，1024 画布，零依赖
 assets/build-icon.sh       逐尺寸渲染并打包 assets/AppIcon.icns
 docs/DESIGN.md             设计取舍与踩坑记录
@@ -354,6 +357,38 @@ screenshots/zh-CN/         中文界面，五页
 `plistPath` 而不是 `StartupItem.id`——这些设计取舍和踩过的坑都在
 [`docs/DESIGN.zh-CN.md`](docs/DESIGN.zh-CN.md)（[English](docs/DESIGN.md)）。
 
+## 持续集成
+
+`.github/workflows/ci.yml` 在每次推 `main` 和每个 PR 上跑，按「能不能可靠地跑在无头 VM 上」
+分层：
+
+| 任务 | 门禁内容 | Runner |
+|---|---|---|
+| `build` | release 编译**零警告**、组装 `MacMon.app`、bundle 身份、图标尺寸齐全、`Package.swift` 与 `Info.plist` 版本一致、`--diagnose` 断言 | `macos-latest` |
+| `hygiene` | 构建产物没有入库、`.gitignore` 仍挡着它们、翻译表完整 | `ubuntu-latest` |
+| `ci` | 汇总成一个必过检查，以后加任务不用再改分支保护 | `ubuntu-latest` |
+
+`--diagnose` 敢当门禁，是因为它跑在 `MacMonApp.init()` 里、早于任何 AppKit 视图，
+只依赖 `sysctl`、`libproc`、IOKit 几个系统接口。断言只看结构不看数值：每段必须有输出、
+进程数必须大于 0、内存分项合计与物理内存偏差在 ±3% 内（runner 是虚拟机，没有电池，
+也基本枚举不到 HID 温度传感器）。
+
+`--menus` 与 `--window-selftest` 需要 WindowServer 会话。GitHub 的 macOS runner 通常有，
+但不保证，所以这两个步骤是 `continue-on-error`：日志进 `selftest-logs` 产物，红了不挡合并。
+另外 `--menus` 在 `NSApp.mainMenu` 为 nil 时**退出码仍是 0**，所以 CI 里查的是日志里的
+`MENU done`，不能只看退出码。
+
+触发事件用 `pull_request` 而不是 `pull_request_target`：来自 fork 的代码只能拿到只读 token，
+读不到 secrets，也推不动仓库。
+
+本地跑同一套：
+
+```bash
+./build-app.sh
+./MacMon.app/Contents/MacOS/MacMon --diagnose
+python3 scripts/check-l10n.py
+```
+
 ## 路线图
 
 - [x] 界面双语（中 / 英），运行中切换，不重启
@@ -370,10 +405,11 @@ screenshots/zh-CN/         中文界面，五页
 2. 改了采集器，把相关的 `--diagnose` 输出贴进 PR 描述，方便对照活动监视器或 `top` 核数。
 3. 改了窗口或通知相关代码，跑一遍 `--window-selftest` 并附上输出。
 4. 新增的界面文案走 `L.t("中文原文")` / `L.f("… %@ …")`，并在 `App/Translations.swift`
-   补一行英文。不要再写裸的 `Text("中文")`——覆盖率自检（在白名单文件之外 grep 中文字面量）会抓到。
+   补一行英文——`python3 scripts/check-l10n.py` 会因为漏翻或 `%@` 数量不一致直接失败，CI 里也会跑。
+5. 别提交 `.build/` 或 `MacMon.app/`，CI 的 `hygiene` 任务会拦。
 
 项目没有 test target：验证手段就是 `--diagnose`（采集）与 `--window-selftest`（窗口生命周期），
-两者都可脚本化。
+两者都可脚本化；CI 会把其中无头环境能跑的部分当门禁。
 
 ## 许可证
 

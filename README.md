@@ -4,6 +4,7 @@
 
 <img src="assets/icon-1024.png" width="112" align="right" alt="MacMon icon">
 
+![CI](https://github.com/karuidu/MacMon/actions/workflows/ci.yml/badge.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-blue)
 ![Swift](https://img.shields.io/badge/Swift-5.10-orange)
 ![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)
@@ -347,6 +348,7 @@ drop them and thicken the stroke. Edit the generator, run it, then `./build-app.
 ## Project structure
 
 ```
+.github/workflows/ci.yml    CI: build, package checks, self-tests, repo hygiene
 Package.swift              SwiftPM manifest — the whole build definition
 Sources/
 ├── CProc/                 Thin C bridge for libproc.h / sys/proc_info.h
@@ -364,6 +366,7 @@ Sources/
 │   ├── Models/            Metric and risk models
 │   └── Views/             DashboardView, Pages/, Cards/, Widgets/, Theme
 build-app.sh               Assemble and ad-hoc sign MacMon.app
+scripts/check-l10n.py      Translation coverage: missing keys, %@ mismatches
 assets/make-icon.swift     Icon generator — Core Graphics, 1024 canvas, no dependencies
 assets/build-icon.sh       Renders every icon size and packs assets/AppIcon.icns
 docs/DESIGN.md             Design decisions and hard-won gotchas
@@ -405,6 +408,41 @@ Design decisions and the traps behind them — the hand-rolled pager, why
 `StartupItem.id` — live in [`docs/DESIGN.md`](docs/DESIGN.md)
 ([中文](docs/DESIGN.zh-CN.md)).
 
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to `main` and every pull request,
+split into layers by how reliably each one survives a headless VM:
+
+| Job | Gates on | Runner |
+|---|---|---|
+| `build` | release build with **zero warnings**, `MacMon.app` assembly, bundle identity, icon size coverage, `Package.swift` / `Info.plist` version agreement, `--diagnose` assertions | `macos-latest` |
+| `hygiene` | no build products committed, `.gitignore` still guards them, translation table complete | `ubuntu-latest` |
+| `ci` | one required status check, so branch protection never needs editing when a job is added | `ubuntu-latest` |
+
+`--diagnose` is a gate because it runs inside `MacMonApp.init()`, before any
+AppKit view exists — it only needs `sysctl`, `libproc` and IOKit. Its assertions
+are structural, never numeric: every section must be printed, the process count
+must be positive, and memory parts must add up within ±3% of physical RAM (the
+runner is a VM with no battery and usually no HID temperature sensors).
+
+`--menus` and `--window-selftest` need a `WindowServer` session. GitHub's macOS
+runners usually have one, but not reliably, so both steps are
+`continue-on-error`: their logs go into the `selftest-logs` artifact and a
+failure there never blocks a merge. Note that `--menus` exits 0 even when
+`NSApp.mainMenu` is nil, so the workflow greps for `MENU done` rather than
+trusting the exit code.
+
+The trigger is `pull_request`, not `pull_request_target` — code from a fork gets a
+read-only token, so a PR cannot read secrets or push anywhere.
+
+The same checks, locally:
+
+```bash
+./build-app.sh
+./MacMon.app/Contents/MacOS/MacMon --diagnose
+python3 scripts/check-l10n.py
+```
+
 ## Roadmap
 
 - [x] Localize the UI (English + Chinese), runtime switch, no restart
@@ -424,11 +462,13 @@ Issues and pull requests are welcome. Before opening a PR:
 3. If you touch window or notification code, run `--window-selftest` and include
    its output.
 4. New user-facing strings go through `L.t("中文原文")` / `L.f("… %@ …")` and get one
-   line in `App/Translations.swift`. Do not add a literal `Text("中文")` — the
-   coverage check (`grep` for CJK outside the allowed files) will catch it.
+   line in `App/Translations.swift`. `python3 scripts/check-l10n.py` fails on a missing
+   key or a `%@` count mismatch, and CI runs it for you.
+5. Do not commit `.build/` or `MacMon.app/` — the `hygiene` job blocks that too.
 
 There is no test target: verification is `--diagnose` (collectors) and
-`--window-selftest` (window lifecycle). Both are scriptable.
+`--window-selftest` (window lifecycle). Both are scriptable, and CI gates on the parts
+that work without a GUI session.
 
 ## License
 
