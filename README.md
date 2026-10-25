@@ -432,6 +432,13 @@ failure there never blocks a merge. Note that `--menus` exits 0 even when
 `NSApp.mainMenu` is nil, so the workflow greps for `MENU done` rather than
 trusting the exit code.
 
+`macos-latest` is currently macOS 26 **arm64**, and that pool gets throttled: a run can
+sit in the queue for 15 minutes and be cancelled without executing a single step
+(`The job was not acquired by Runner of type hosted even after multiple attempts`).
+The `ci` aggregator therefore treats `cancelled` differently from `failure` — a missing
+runner emits a warning instead of blocking the merge, so an infrastructure hiccup never
+reads as a broken PR. If it keeps happening, point `runs-on` at `macos-26-intel`.
+
 The trigger is `pull_request`, not `pull_request_target` — code from a fork gets a
 read-only token, so a PR cannot read secrets or push anywhere.
 

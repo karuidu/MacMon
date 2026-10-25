@@ -378,6 +378,12 @@ screenshots/zh-CN/         中文界面，五页
 另外 `--menus` 在 `NSApp.mainMenu` 为 nil 时**退出码仍是 0**，所以 CI 里查的是日志里的
 `MENU done`，不能只看退出码。
 
+`macos-latest` 目前是 macOS 26 **arm64**，这个池子会被限流：一次运行可能在队列里躺满 15 分钟，
+一个步骤都没执行就被取消（`The job was not acquired by Runner of type hosted even after
+multiple attempts`）。所以 `ci` 汇总任务把 `cancelled` 和 `failure` 分开处理——抢不到 runner
+只打 warning 不挡合并，基础设施抖动不会被读成「这个 PR 有毛病」。如果长期抢不到，把
+`runs-on` 改成 `macos-26-intel`。
+
 触发事件用 `pull_request` 而不是 `pull_request_target`：来自 fork 的代码只能拿到只读 token，
 读不到 secrets，也推不动仓库。
 

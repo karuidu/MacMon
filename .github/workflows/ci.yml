@@ -8,6 +8,14 @@ name: CI
 #
 # 触发方式刻意用 `pull_request` 而不是 `pull_request_target`：
 # 前者只给 fork 来的代码一个只读 token，泄露不了 secrets，也推不了仓库。
+#
+# 一个实测过的坑（2026-10-21 第一次跑就撞上）：`macos-latest` 现在是 macOS 26 **arm64**，
+# 容量紧张时排队 15 分钟也抢不到 runner，GitHub 直接把 job 判成 cancelled，注解写着
+# 「The job was not acquired by Runner of type hosted even after multiple attempts」+
+# 「Due to capacity constraints, jobs targeting macOS arm64 runners may experience
+# longer queue times.」——那个 job 的步骤数是 0，一个字节的代码都没跑，跟代码无关。
+# 处理办法见末尾 `ci` 汇总 job；若长期抢不到，把下面 build 的 runs-on 换成
+# `macos-26-intel`（x64 镜像，同样能编过这个 Package）。
 
 on:
   push:
@@ -30,10 +38,15 @@ env:
 jobs:
   build:
     name: 构建与打包
+    # macos-latest = macOS 26 arm64。抢不到 runner 时改 macos-26-intel（x64）。
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      # v4 跑在 Node 20 上，GitHub 已弃用并强制抬到 Node 24，annotation 里会报一堆
+      # warning。v7 原生 Node 24；v7 唯一的 breaking change 是禁掉
+      # `pull_request_target` / `workflow_run` 场景下 checkout fork 的代码——本文件用
+      # 的是 `pull_request`，不受影响。
+      - uses: actions/checkout@v7
 
       - name: 工具链版本
         run: |
@@ -145,7 +158,7 @@ jobs:
 
       - name: 上传日志
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: selftest-logs
           path: |
@@ -160,7 +173,7 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent MacMon.app MacMon.zip
           ls -lh MacMon.zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: MacMon-app
           path: MacMon.zip
@@ -171,7 +184,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # 这两条是 .build/（199 MB）和 MacMon.app/（3.5 MB）被误提交的看门狗。
       # 一旦进了历史，后面清起来要 rewrite。
@@ -198,6 +211,13 @@ jobs:
 
   # 一个空 job 汇总上面两个，分支保护只需要勾这一个必过检查，
   # 以后加 job 不用去改分支保护规则。
+  #
+  # 这里刻意区分「跑挂了」和「没抢到 runner」：
+  #   failure   = 真有问题（编译报错、断言失败）→ 挡合并
+  #   cancelled = GitHub 容量不足，排队 15 分钟没给 runner，步骤一个都没执行
+  #               → 不挡合并，只打 warning。否则纯排队的偶发问题会把每个 PR 判红。
+  # 注意 run 级别的结论仍会是红叉（build 那格确实是 cancelled），但分支保护勾的是
+  # 这个 job 的名字，PR 不会被它挡。
   ci:
     name: CI 通过
     needs: [build, hygiene]
@@ -206,7 +226,24 @@ jobs:
     steps:
       - name: 汇总结果
         run: |
-          echo "build=${{ needs.build.result }}  hygiene=${{ needs.hygiene.result }}"
-          [ "${{ needs.build.result }}" = "success" ] || exit 1
-          [ "${{ needs.hygiene.result }}" = "success" ] || exit 1
-          echo "✓ 全部通过"
+          build="${{ needs.build.result }}"
+          hygiene="${{ needs.hygiene.result }}"
+          echo "build=$build  hygiene=$hygiene"
+
+          if [ "$hygiene" != "success" ]; then
+            echo "::error::仓库体检未通过（$hygiene），看上面那个 job 的日志"
+            exit 1
+          fi
+
+          case "$build" in
+            success)
+              echo "✓ 编译、打包、自检全部通过"
+              ;;
+            cancelled)
+              echo "::warning title=macOS runner 没抢到::构建作业被取消，通常是 GitHub 的 macOS arm64 容量不足（排队 15 分钟超时），该作业的步骤数为 0、代码一行都没跑。这不代表代码有问题——在 Actions 页面点 Re-run failed jobs 重试即可。"
+              ;;
+            *)
+              echo "::error::构建作业失败（$build），这是真的没过，不是排队问题"
+              exit 1
+              ;;
+          esac
