@@ -8,6 +8,8 @@
 .build/
 .swiftpm/
 MacMon.app/
+# scripts/make-release.sh 的出口：发布包挂 GitHub Release，不进仓库
+dist/
 DerivedData/
 *.dSYM
 *.dSYM.zip

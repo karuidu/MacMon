@@ -139,12 +139,19 @@ open MacMon.app
 `build-app.sh` writes `Info.plist` (`com.macmon.desktop`, `LSMinimumSystemVersion`
 14.0), packs the icon from `assets/AppIcon.icns`, and ad-hoc signs the bundle.
 
-> **Gatekeeper note.** The bundle is ad-hoc signed, not notarized. If you downloaded
-> it as an archive rather than building it yourself, macOS will refuse the first
-> launch. Either right-click → **Open**, or clear the quarantine attribute:
+Prebuilt, ad-hoc signed builds live under
+[Releases](https://github.com/karuidu/MacMon/releases) — take `-arm64` for Apple
+silicon, `-x86_64` for Intel, or `-universal` if you would rather not check (it
+carries both and is only 0.7 MB larger).
+
+> **Gatekeeper note.** The bundle is ad-hoc signed, not notarized — `spctl -a` returns
+> `rejected`. If you downloaded an archive rather than building it yourself, macOS
+> blocks the first launch. **The old control-click → Open shortcut is gone on macOS 15
+> and later**; use System Settings → Privacy & Security → **Open Anyway**, or clear the
+> quarantine attribute from Terminal:
 >
 > ```bash
-> xattr -dr com.apple.quarantine MacMon.app
+> xattr -dr com.apple.quarantine /Applications/MacMon.app
 > ```
 
 ## Usage
@@ -370,6 +377,7 @@ scripts/check-l10n.py      Translation coverage: missing keys, %@ mismatches
 assets/make-icon.swift     Icon generator — Core Graphics, 1024 canvas, no dependencies
 assets/build-icon.sh       Renders every icon size and packs assets/AppIcon.icns
 docs/DESIGN.md             Design decisions and hard-won gotchas
+docs/CI.md                 CI standard (Chinese): skeleton, assertions, triage table
 screenshots/en/            English UI, five pages
 screenshots/zh-CN/         Chinese UI, five pages
 ```
@@ -418,6 +426,7 @@ split into layers by how reliably each one survives a headless VM:
 | `build` | release build with **zero warnings**, `MacMon.app` assembly, bundle identity, icon size coverage, `Package.swift` / `Info.plist` version agreement, `--diagnose` assertions | `macos-latest` |
 | `hygiene` | no build products committed, `.gitignore` still guards them, translation table complete | `ubuntu-latest` |
 | `ci` | one required status check, so branch protection never needs editing when a job is added | `ubuntu-latest` |
+| `release` | `v*` tags only: builds `-arm64`, `-x86_64` and `-universal` zips, then creates the GitHub Release | `macos-latest` |
 
 `--diagnose` is a gate because it runs inside `MacMonApp.init()`, before any
 AppKit view exists — it only needs `sysctl`, `libproc` and IOKit. Its assertions
@@ -449,6 +458,10 @@ The same checks, locally:
 ./MacMon.app/Contents/MacOS/MacMon --diagnose
 python3 scripts/check-l10n.py
 ```
+
+The configuration standard behind this file — the five design rules, a copy-paste
+skeleton, a triage table for "CI is red and I can't tell why", and the list of traps
+this project actually hit — is in [`docs/CI.md`](docs/CI.md) (Chinese).
 
 ## Roadmap
 

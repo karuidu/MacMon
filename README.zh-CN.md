@@ -119,11 +119,17 @@ open MacMon.app
 `build-app.sh` 会写入 `Info.plist`（`com.macmon.desktop`、`LSMinimumSystemVersion` 14.0），
 从 `assets/AppIcon.icns` 打包图标，最后做 ad-hoc 签名。
 
-> **Gatekeeper 提示。** 产物是 ad-hoc 签名、没有公证。如果你是下载压缩包而不是自己编译的，
-> 首次双击会被系统拒绝。右键 → **打开**，或者清掉隔离属性：
+不想自己编译的话，预编译包在 [Releases](https://github.com/karuidu/MacMon/releases)，按芯片挑：
+Apple 芯片下 `-arm64`，Intel 下 `-x86_64`，不想挑就下 `-universal`（两个架构都在里面，
+只大 0.7 MB）。
+
+> **Gatekeeper 提示。** 产物是 ad-hoc 签名、没有 Apple 公证（`spctl -a` 的结果就是
+> `rejected`）。如果你下载的是压缩包而不是自己编译的，首次双击会被系统拦住。
+> **macOS 15 起「右键 → 打开」这个绕过方式已经取消**，改为：系统设置 → 隐私与安全性 →
+> 拉到最下面点「仍要打开」；或者在终端清掉隔离属性：
 >
 > ```bash
-> xattr -dr com.apple.quarantine MacMon.app
+> xattr -dr com.apple.quarantine /Applications/MacMon.app
 > ```
 
 ## 使用
@@ -327,6 +333,7 @@ scripts/check-l10n.py      翻译覆盖率：漏翻的键、%@ 数量不一致
 assets/make-icon.swift     图标生成器：Core Graphics，1024 画布，零依赖
 assets/build-icon.sh       逐尺寸渲染并打包 assets/AppIcon.icns
 docs/DESIGN.md             设计取舍与踩坑记录
+docs/CI.md                 CI 配置标准：骨架、断言写法、分诊表
 screenshots/en/            英文界面，五页
 screenshots/zh-CN/         中文界面，五页
 ```
@@ -367,6 +374,7 @@ screenshots/zh-CN/         中文界面，五页
 | `build` | release 编译**零警告**、组装 `MacMon.app`、bundle 身份、图标尺寸齐全、`Package.swift` 与 `Info.plist` 版本一致、`--diagnose` 断言 | `macos-latest` |
 | `hygiene` | 构建产物没有入库、`.gitignore` 仍挡着它们、翻译表完整 | `ubuntu-latest` |
 | `ci` | 汇总成一个必过检查，以后加任务不用再改分支保护 | `ubuntu-latest` |
+| `release` | 只在推 `v*` tag 时：出 `-arm64` / `-x86_64` / `-universal` 三个包，然后创建 Release | `macos-latest` |
 
 `--diagnose` 敢当门禁，是因为它跑在 `MacMonApp.init()` 里、早于任何 AppKit 视图，
 只依赖 `sysctl`、`libproc`、IOKit 几个系统接口。断言只看结构不看数值：每段必须有输出、
@@ -394,6 +402,9 @@ multiple attempts`）。所以 `ci` 汇总任务把 `cancelled` 和 `failure` �
 ./MacMon.app/Contents/MacOS/MacMon --diagnose
 python3 scripts/check-l10n.py
 ```
+
+这套配置背后的标准——五条设计原则、可直接复制的骨架、以「CI 红了但看不出为什么」开头的
+分诊表，以及本项目真踩过的坑——写在 [`docs/CI.md`](docs/CI.md) 里，新项目可以直接照抄。
 
 ## 路线图
 

@@ -16,10 +16,14 @@ name: CI
 # longer queue times.」——那个 job 的步骤数是 0，一个字节的代码都没跑，跟代码无关。
 # 处理办法见末尾 `ci` 汇总 job；若长期抢不到，把下面 build 的 runs-on 换成
 # `macos-26-intel`（x64 镜像，同样能编过这个 Package）。
+#
+# 发版：推一个 `v*` 的 tag 会额外触发 `release` job，编译出三种架构的包并挂到 Release。
+# 平时推 main / 开 PR 不会碰它（if 里限定了 refs/tags/v*）。
 
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -191,7 +195,7 @@ jobs:
       - name: 构建产物没有入库
         run: |
           set -euo pipefail
-          if git ls-files | grep -E '^(\.build/|\.swiftpm/|MacMon\.app/|DerivedData/)'; then
+          if git ls-files | grep -E '^(\.build/|\.swiftpm/|MacMon\.app/|dist/|DerivedData/)'; then
             echo "::error::构建产物被提交了。执行 git rm -r --cached <路径> 后再提交。"
             exit 1
           fi
@@ -200,7 +204,7 @@ jobs:
       - name: .gitignore 仍然挡着构建产物
         run: |
           set -euo pipefail
-          for entry in '.build/' 'MacMon.app/' '.DS_Store'; do
+          for entry in '.build/' 'MacMon.app/' 'dist/' '.DS_Store'; do
             grep -qxF "$entry" .gitignore || {
               echo "::error::.gitignore 里少了「$entry」这一行"; exit 1; }
           done
@@ -247,3 +251,65 @@ jobs:
               exit 1
               ;;
           esac
+
+  # 只在推 `v*` tag 时跑。出包逻辑全在 scripts/make-release.sh 里，workflow 只做
+  # 「跑脚本 + 传上去」——本地和 CI 走同一条命令，出问题时能原地复现。
+  #
+  # 为什么需要 contents: write：全局是只读，创建 Release 要写权限，只能在这个 job 里放开。
+  # 为什么 needs: [build]：build 挂了就不该发版。代价是 build 因容量被 cancelled 时这里也会
+  # 被跳过——那就重跑一次，比发出去一个没验证过的包强。
+  release:
+    name: 出发行包
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build]
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 构建三种架构的包
+        # 版本号从 tag 取（v1.2.0 → 1.2.0），不然每个 release 里都是 1.0.0
+        run: VERSION="${GITHUB_REF_NAME#v}" ./scripts/make-release.sh
+
+      - name: 校验和写进运行摘要
+        run: |
+          {
+            echo "### 发行包"
+            echo ""
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 创建或更新 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          # 重跑同一个 tag 时 Release 可能已存在，这时补传并刷新说明，而不是报错退出
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，覆盖资产"
+            gh release upload "$TAG" dist/MacMon-*.zip dist/SHA256SUMS --clobber
+            gh release edit "$TAG" --notes-file dist/release-notes.md
+          else
+            gh release create "$TAG" \
+              dist/MacMon-*.zip dist/SHA256SUMS \
+              --verify-tag \
+              --title "MacMon ${TAG#v}" \
+              --notes-file dist/release-notes.md
+          fi
+          gh release view "$TAG" --json url -q .url
+
+      - name: 留档为 workflow 产物
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ github.ref_name }}
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS
+            dist/release-notes.md
+          if-no-files-found: warn

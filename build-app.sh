@@ -1,21 +1,32 @@
 #!/bin/bash
 # 把 Swift Package 的 release 产物组装成可双击运行的 MacMon.app
+#
+# 可用环境变量（默认值保持原样，CI 和本地直接跑不受影响）：
+#   APP_PATH   输出 bundle 路径，默认 MacMon.app
+#   BIN_DIR    从哪个目录取可执行文件，默认 .build/release
+#   VERSION    CFBundleShortVersionString，默认 1.0.0
+#   SKIP_BUILD 非空则跳过编译，直接用 BIN_DIR 里已有的产物
+#              （scripts/make-release.sh 用它来打包 universal 二进制）
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-APP="MacMon.app"
-BUILD_DIR=".build/release"
+APP="${APP_PATH:-MacMon.app}"
+BUILD_DIR="${BIN_DIR:-.build/release}"
 BIN="MacMon"
-VERSION="1.0.0"
+VERSION="${VERSION:-1.0.0}"
 BUNDLE_ID="com.macmon.desktop"
 
-echo "▸ 构建 release…"
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
-# 受限环境（CI、外层已经套了 sandbox 的容器）里 SwiftPM 编译 manifest 时会再套一层
-# sandbox-exec，可能直接报 `sandbox_apply: Operation not permitted` 并伪装成
-# `Invalid manifest`。这种环境用 SWIFT_BUILD_ARGS=--disable-sandbox ./build-app.sh 绕过。
-swift build -c release ${SWIFT_BUILD_ARGS:-}
+if [ -n "${SKIP_BUILD:-}" ]; then
+  echo "▸ 跳过编译，直接使用 $BUILD_DIR/$BIN"
+else
+  echo "▸ 构建 release…"
+  # 受限环境（CI、外层已经套了 sandbox 的容器）里 SwiftPM 编译 manifest 时会再套一层
+  # sandbox-exec，可能直接报 `sandbox_apply: Operation not permitted` 并伪装成
+  # `Invalid manifest`。这种环境用 SWIFT_BUILD_ARGS=--disable-sandbox ./build-app.sh 绕过。
+  swift build -c release ${SWIFT_BUILD_ARGS:-}
+fi
 
 if [ ! -x "$BUILD_DIR/$BIN" ]; then
   echo "✗ 未找到产物 $BUILD_DIR/$BIN"
@@ -23,6 +34,7 @@ if [ ! -x "$BUILD_DIR/$BIN" ]; then
 fi
 
 echo "▸ 组装 ${APP}…"
+mkdir -p "$(dirname "$APP")"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BUILD_DIR/$BIN" "$APP/Contents/MacOS/$BIN"
